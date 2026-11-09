@@ -1,5 +1,20 @@
 import React, { useEffect, useState } from "react";
 
+async function requestApi(url, options = {}) {
+  const response = await fetch(url, {
+    ...options,
+    headers: {
+      ...(options.body ? { "Content-Type": "application/json" } : {}),
+      ...options.headers,
+    },
+  });
+  const result = response.status === 204 ? {} : await response.json();
+  if (!response.ok) {
+    throw new Error(result.error || "Something went wrong. Please try again.");
+  }
+  return result;
+}
+
 function BrandMark() {
   return (
     <div className="brand" aria-label="Carbon Labs">
@@ -183,6 +198,316 @@ function AuthCard({ mode, onAuthenticated, onNavigate, message, setMessage }) {
   );
 }
 
+function Dashboard({ user }) {
+  const [snapshot, setSnapshot] = useState(null);
+  const [isLoading, setIsLoading] = useState(true);
+  const [busyAction, setBusyAction] = useState("");
+  const [isViewing, setIsViewing] = useState(false);
+  const [frameVersion, setFrameVersion] = useState(0);
+  const [errorMessage, setErrorMessage] = useState("");
+
+  useEffect(() => {
+    let active = true;
+    const loadWorkspace = async () => {
+      try {
+        const result = await requestApi("/api/workspace");
+        if (active) {
+          setSnapshot(result);
+          setErrorMessage("");
+        }
+      } catch (error) {
+        if (active) {
+          setErrorMessage(error.message || "Unable to load your workspace.");
+        }
+      } finally {
+        if (active) setIsLoading(false);
+      }
+    };
+
+    loadWorkspace();
+    const intervalId = window.setInterval(loadWorkspace, 15_000);
+    return () => {
+      active = false;
+      window.clearInterval(intervalId);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!isViewing) return undefined;
+
+    const sendPresence = (active) => {
+      requestApi("/api/workspace/presence", {
+        method: "POST",
+        body: JSON.stringify({ active }),
+      }).catch((error) => {
+        setErrorMessage(error.message || "Unable to update your session status.");
+      });
+    };
+    const syncVisibility = () => {
+      sendPresence(document.visibilityState === "visible");
+    };
+
+    syncVisibility();
+    const intervalId = window.setInterval(syncVisibility, 20_000);
+    document.addEventListener("visibilitychange", syncVisibility);
+    return () => {
+      window.clearInterval(intervalId);
+      document.removeEventListener("visibilitychange", syncVisibility);
+    };
+  }, [isViewing]);
+
+  async function leaveBrowser() {
+    setIsViewing(false);
+    try {
+      await requestApi("/api/workspace/presence", {
+        method: "POST",
+        body: JSON.stringify({ active: false }),
+      });
+    } catch (error) {
+      setErrorMessage(error.message || "Unable to update your session status.");
+    }
+  }
+
+  async function runWorkspaceAction(action, { enter = false } = {}) {
+    setBusyAction(action);
+    setErrorMessage("");
+    try {
+      const result = await requestApi(`/api/workspace/${action}`, {
+        method: "POST",
+      });
+      setSnapshot((current) => ({
+        ...current,
+        workspace: result.workspace,
+      }));
+      if (enter) setIsViewing(true);
+      if (action === "stop" || action === "reset") setIsViewing(false);
+    } catch (error) {
+      setErrorMessage(error.message || "Unable to update your workspace.");
+    } finally {
+      setBusyAction("");
+    }
+  }
+
+  const workspace = snapshot?.workspace;
+  const isRunning = workspace?.status === "running";
+  const isStarting = workspace?.status === "starting";
+
+  return (
+    <section className="dashboard-main" aria-labelledby="dashboard-heading">
+      <div className="dashboard-content">
+        <div className="dashboard-intro">
+          <div className="dashboard-heading-copy">
+            <div className="card-kicker">
+              <span className="kicker-dot" />
+              YOUR PRIVATE WORKSPACE
+            </div>
+            <h1 id="dashboard-heading">
+              Hello <span className="title-highlight">{user.username}</span>
+              <span className="title-period">.</span>
+            </h1>
+            <p className="dashboard-subtitle">
+              Your own browser, ready whenever you are.
+            </p>
+          </div>
+          <div className="active-users" aria-live="polite">
+            <span className="active-users-icon" aria-hidden="true">
+              <span />
+            </span>
+            <div>
+              <strong>{snapshot?.activeUsers ?? "—"}</strong>
+              <span>using their browser now</span>
+            </div>
+          </div>
+        </div>
+
+        {errorMessage && (
+          <p className="dashboard-error" role="alert">
+            {errorMessage}
+          </p>
+        )}
+
+        {isViewing && isRunning ? (
+          <section className="browser-session" aria-label="Chromium session">
+            <div className="session-toolbar">
+              <div className="session-connection">
+                <span className="connection-indicator" />
+                <span>Private browser</span>
+              </div>
+              <div className="session-actions">
+                <button
+                  className="session-toolbar-button"
+                  type="button"
+                  onClick={() => setFrameVersion((version) => version + 1)}
+                  aria-label="Refresh browser"
+                  title="Refresh browser"
+                >
+                  <svg viewBox="0 0 20 20" fill="none" aria-hidden="true">
+                    <path
+                      d="M16 8a6 6 0 0 0-10.4-2L4 7.5M4 4v3.5h3.5M4 12a6 6 0 0 0 10.4 2L16 12.5M16 16v-3.5h-3.5"
+                      stroke="currentColor"
+                      strokeWidth="1.5"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                  </svg>
+                  <span>Refresh</span>
+                </button>
+                <button
+                  className="session-toolbar-button"
+                  type="button"
+                  onClick={leaveBrowser}
+                >
+                  Exit browser
+                </button>
+              </div>
+            </div>
+            <iframe
+              key={frameVersion}
+              className="browser-frame"
+              src="/session/"
+              title="Your Chromium browser"
+              allow="clipboard-read; clipboard-write; fullscreen"
+              allowFullScreen
+            />
+          </section>
+        ) : (
+          <section className="workspace-card" aria-labelledby="workspace-title">
+            <div className="workspace-card-copy">
+              <div className="workspace-icon" aria-hidden="true">
+                <svg viewBox="0 0 32 32" fill="none">
+                  <rect
+                    x="4.5"
+                    y="6.5"
+                    width="23"
+                    height="19"
+                    rx="2.5"
+                    stroke="currentColor"
+                    strokeWidth="1.5"
+                  />
+                  <path
+                    d="M5 11h22M9 8.8h.1m3.3 0h.1m3.3 0h.1"
+                    stroke="currentColor"
+                    strokeWidth="1.5"
+                    strokeLinecap="round"
+                  />
+                  <path
+                    d="m12 16 3 2.5-3 2.5m5 0h4"
+                    stroke="currentColor"
+                    strokeWidth="1.5"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+              </div>
+              <div>
+                <div className="workspace-status">
+                  <span className={isRunning ? "status-dot is-running" : "status-dot"} />
+                  {isLoading
+                    ? "Checking your workspace"
+                    : isRunning
+                      ? "Browser is ready"
+                      : isStarting
+                        ? "Starting your browser"
+                      : workspace?.hasSavedData
+                        ? "Saved browser profile"
+                        : "No active session"}
+                </div>
+                <h2 id="workspace-title">
+                  {isRunning
+                    ? "Your browser is waiting"
+                    : isStarting
+                      ? "Your browser is starting"
+                    : workspace?.hasSavedData
+                      ? "Pick up where you left off"
+                      : "A browser of your own"}
+                </h2>
+                <p>
+                  {isRunning
+                    ? "Your private Chromium session is running. Rejoin it or stop it when you are done."
+                    : isStarting
+                      ? "Your private Chromium session is getting ready. This can take a moment."
+                    : workspace?.hasSavedData
+                      ? "Your container is stopped, but your browser profile and files are saved."
+                      : "Start a private Chromium session. Your profile and files will be saved between visits."}
+                </p>
+              </div>
+            </div>
+
+            <div className="workspace-controls">
+              <button
+                className="submit-button workspace-primary-button"
+                type="button"
+                disabled={Boolean(busyAction) || isLoading || isStarting}
+                onClick={() =>
+                  runWorkspaceAction("start", { enter: true })
+                }
+              >
+                <span>
+                  {busyAction === "start"
+                    ? "Starting your browser..."
+                    : isStarting
+                      ? "Starting your browser..."
+                    : isRunning
+                      ? "Rejoin session"
+                      : workspace?.hasSavedData
+                        ? "Resume saved session"
+                        : "Start a session"}
+                </span>
+                <svg viewBox="0 0 20 20" fill="none" aria-hidden="true">
+                  <path
+                    d="M4.5 10h11m0 0-4.5-4.5M15.5 10 11 14.5"
+                    stroke="currentColor"
+                    strokeWidth="1.6"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+              </button>
+              {workspace?.hasSavedData && (
+                <button
+                  className="quiet-button"
+                  type="button"
+                  disabled={Boolean(busyAction)}
+                  onClick={() => {
+                    if (
+                      window.confirm(
+                        "Reset your browser profile? This permanently deletes saved browser data and files.",
+                      )
+                    ) {
+                      runWorkspaceAction("reset");
+                    }
+                  }}
+                >
+                  {busyAction === "reset" ? "Resetting..." : "Reset profile"}
+                </button>
+              )}
+              {isRunning && (
+                <button
+                  className="quiet-button stop-button"
+                  type="button"
+                  disabled={Boolean(busyAction)}
+                  onClick={() => runWorkspaceAction("stop")}
+                >
+                  {busyAction === "stop" ? "Stopping..." : "Stop session"}
+                </button>
+              )}
+            </div>
+          </section>
+        )}
+
+        <section className="community-card" aria-label="Community">
+          <div className="community-mark" aria-hidden="true">✳</div>
+          <div>
+            <h2>A little more room to connect</h2>
+            <p>We’re saving a spot for the community features coming next.</p>
+          </div>
+          <span className="coming-soon">COMING SOON</span>
+        </section>
+      </div>
+    </section>
+  );
+}
+
 export default function App() {
   const [route, setRoute] = useState(window.location.pathname);
   const [user, setUser] = useState(null);
@@ -253,6 +578,14 @@ export default function App() {
   async function handleLogout() {
     setMessage("");
     try {
+      try {
+        await requestApi("/api/workspace/presence", {
+          method: "POST",
+          body: JSON.stringify({ active: false }),
+        });
+      } catch (error) {
+        console.error("Could not clear workspace presence before logout:", error);
+      }
       const response = await fetch("/api/auth/logout", { method: "POST" });
       if (!response.ok) {
         throw new Error("Unable to log out. Please try again.");
@@ -268,7 +601,9 @@ export default function App() {
   const showDashboard = Boolean(user) && route === "/dashboard";
 
   return (
-    <main className={`page-shell ${isSignup ? "signup-page" : ""}`}>
+    <main
+      className={`page-shell ${isSignup ? "signup-page" : ""} ${showDashboard ? "dashboard-page" : ""}`}
+    >
       <header className="topbar">
         <BrandMark />
         {showDashboard ? (
@@ -287,24 +622,7 @@ export default function App() {
           Preparing your workspace...
         </div>
       ) : showDashboard ? (
-        <section className="dashboard-main" aria-labelledby="dashboard-heading">
-          <div className="dashboard-card">
-            <div className="card-kicker">
-              <span className="kicker-dot" />
-              YOUR WORKSPACE
-            </div>
-            <h1 id="dashboard-heading">
-              Hello <span className="title-highlight">{user.username}</span>
-              <span className="title-period">.</span>
-            </h1>
-            <p className="card-description">Your Carbon Labs workspace is ready.</p>
-            {message && (
-              <p className="form-message" role="alert">
-                {message}
-              </p>
-            )}
-          </div>
-        </section>
+        <Dashboard key={user.username} user={user} />
       ) : (
         <div className="main-layout">
           <WelcomePanel />

@@ -2,10 +2,79 @@ services:
   mongo:
     image: mongo:7
     restart: unless-stopped
-    ports:
-      - "127.0.0.1:27017:27017"
     volumes:
       - mongo_data:/data/db
+    networks:
+      database:
+        ipv4_address: 172.30.254.2
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 3001
+      BIND_ADDRESS: ${DOCKER_HOST_GATEWAY:-172.17.0.1}
+      MONGO_URI: mongodb://mongo:27017/carbon-labs
+      SESSION_SECRET: ${SESSION_SECRET:?Set SESSION_SECRET in .env}
+      DOCKER_HOST: unix:///var/run/docker.sock
+      DOCKER_PROXY_HOST: 127.0.0.1
+      CHROMIUM_IMAGE: ${CHROMIUM_IMAGE:-lscr.io/linuxserver/chromium:latest}
+      TZ: ${TZ:-UTC}
+    extra_hosts:
+      - "mongo:172.30.254.2"
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    group_add:
+      - "${DOCKER_GID:-990}"
+    depends_on:
+      mongo:
+        condition: service_healthy
+    network_mode: host
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://${DOCKER_HOST_GATEWAY:-172.17.0.1}:3001/api/healthz').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    restart: unless-stopped
+    environment:
+      API_UPSTREAM: ${DOCKER_HOST_GATEWAY:-172.17.0.1}:3001
+      NGINX_ENVSUBST_FILTER: "^API_UPSTREAM$"
+    depends_on:
+      backend:
+        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "${FRONTEND_PORT:-8080}:80"
+    networks:
+      - frontend
 
 volumes:
   mongo_data:
+
+networks:
+  frontend:
+  database:
+    ipam:
+      config:
+        - subnet: 172.30.254.0/24
